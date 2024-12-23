@@ -1,16 +1,22 @@
 import express, { Request, Response } from 'express';
 import { Connection, PublicKey, Keypair, sendAndConfirmTransaction, Transaction, SYSVAR_RENT_PUBKEY, SystemProgram, ComputeBudgetProgram } from '@solana/web3.js';
-import {TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, getOrCreateAssociatedTokenAccount, mintTo, createMint, getAssociatedTokenAddress} from "@solana/spl-token"
+import {TOKEN_PROGRAM_ID, getOrCreateAssociatedTokenAccount, mintTo, createMint, getAssociatedTokenAddress} from "@solana/spl-token"
 import { Program, AnchorProvider, Wallet, web3, BN } from '@coral-xyz/anchor';
 import {AiAgent, idljson } from './idl/ai_agent';
-import * as fs from "fs";
 import * as dotenv from 'dotenv';
 import { ASSOCIATED_PROGRAM_ID } from '@coral-xyz/anchor/dist/cjs/utils/token';
+import cors from "cors";
 
 dotenv.config();
 
 const app = express();
+app.use(cors());
 app.use(express.json());
+
+
+const history: { time: number; open: number; high: number; low: number; close: number; }[] = [];
+let counter = 0
+
 
 const PORT = process.env.PORT || 3000;
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
@@ -66,11 +72,57 @@ const teamAccount = new PublicKey("6XF158v9uXWL7dpJnkJFHKpZgzmLXX5HoH4vG5hPsmmP"
 //   }
 // });
 
+const fetchPoolData = async (tokenMint:string)=>{
+  const mint = new PublicKey(tokenMint)
+  const [poolPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from(POOL_SEED_PREFIX), mint.toBuffer()],
+    program.programId
+  );
+
+  const stateData = await program.account.liquidityPool.fetch(poolPda);
+  const reserveSol = stateData.reserveSol
+  const reserveToken = stateData.reserveToken
+  const total_supply = stateData.totalSupply
+
+  const tokenDecimals = 9;
+  const reserveTokenScaledBN = reserveToken.div(new BN(Math.pow(10, tokenDecimals)));
+
+  // Calculate the price: reserveSol / reserveTokenScaled
+  const price = (parseInt(reserveSol.toString()))/(parseInt(reserveTokenScaledBN.toString())) // Divide reserveSol by scaled reserveToken
+
+  console.log('priceBN:', price);
+
+
+
+  return { reserveSol: parseInt(reserveSol.toString()), reserveToken: parseInt(reserveTokenScaledBN.toString()), price:price}
+}
+
+async function generateCandlestickData(tokenMint:string) {
+  
+  const data = await fetchPoolData(tokenMint);
+
+  // simulating
+  for (let i = counter; i < counter + 10; i++) {
+    const timestamp = Math.floor(Date.now() / 1000) + i * 3600; // Hourly intervals
+    const open = data.price * (1 - Math.random() * 0.01); // Simulate small changes
+    const high = open * (1 + Math.random() * 0.01);
+    const low = open * (1 - Math.random() * 0.01);
+    const close = (open + high + low) / 3;
+
+    history.push({ time: timestamp, open, high, low, close });
+    
+  }
+  counter+=10
+  
+  return history;
+}
+
+
 // Create pool route
 app.get("/create-token-and-add-liquidity", async (req, res) => {
   try {
     const {user_key} = req.body
-    // Step 1: Create a new SPL Token
+
     console.log("Creating a new token...");
     const user = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(user_key)));
     const mint = await createMint(connection, user, user.publicKey, null, 9); // 9 decimals
@@ -78,14 +130,13 @@ app.get("/create-token-and-add-liquidity", async (req, res) => {
 
     const amount = new BN(1000000000).mul(new BN(10 ** 9))
 
-    // Step 2: Get or create the user's associated token account
+
     console.log("Getting user's associated token account...");
     const userTokenAccount = await getOrCreateAssociatedTokenAccount(connection, user, mint, user.publicKey)
 
     console.log("Minting tokens to the user...");
     await mintTo(connection, user, mint, userTokenAccount.address, user, BigInt(amount.toString()));
 
-    // Step 4: Create the pool PDA
     console.log("Creating the pool PDA...");
     const [poolPda] = PublicKey.findProgramAddressSync(
       [Buffer.from(POOL_SEED_PREFIX), mint.toBuffer()],
@@ -194,7 +245,7 @@ app.get("/create-token-and-add-liquidity", async (req, res) => {
 //   }
 // });
 
-// Buy route
+
 app.post('/buy', async (req: Request, res: Response) => {
     try {
     
@@ -261,7 +312,6 @@ app.post('/buy', async (req: Request, res: Response) => {
   }
 });
 
-// Sell route
 app.post('/sell', async (req: Request, res: Response) => {
 
   try {
@@ -326,6 +376,27 @@ app.post('/sell', async (req: Request, res: Response) => {
     res.status(500).send({ error: error.message });
   }
 });
+
+app.get('/candlestickdata/:tokenmint', async (req: Request, res: Response) => {
+  try {
+  
+  const { tokenmint } = req.params;
+  const data = await generateCandlestickData(tokenmint)
+  res.status(200).json({data});
+} catch (error:any) {
+  res.status(500).send({ error: error.message });
+}
+});
+
+app.get('/poolData/:tokenmint', async (req:Request, res:Response) => {
+  try {
+    const { tokenmint } = req.params;
+    const data = await fetchPoolData(tokenmint)
+    res.status(200).json(data)
+  } catch (error:any) {
+    res.status(500).send({ error: error.message });
+  }
+})
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);

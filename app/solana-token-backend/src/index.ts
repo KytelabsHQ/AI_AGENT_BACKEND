@@ -13,10 +13,21 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-
-const history: { time: number; open: number; high: number; low: number; close: number; }[] = [];
 let counter = 0
 
+
+type CandlestickData = {
+  time: number; // Timestamp
+  open: number; // Opening price
+  high: number; // Highest price
+  low: number;  // Lowest price
+  close: number; // Closing price
+};
+
+const tokenDataMap = new Map<
+  string,
+  { history: CandlestickData[]; lastFetchedTimestamp: number }
+>();
 
 const PORT = process.env.PORT || 3000;
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
@@ -78,7 +89,7 @@ const fetchPoolData = async (tokenMint:string)=>{
     [Buffer.from(POOL_SEED_PREFIX), mint.toBuffer()],
     program.programId
   );
-
+  console.log("here")
   const stateData = await program.account.liquidityPool.fetch(poolPda);
   const reserveSol = stateData.reserveSol
   const reserveToken = stateData.reserveToken
@@ -99,21 +110,81 @@ const fetchPoolData = async (tokenMint:string)=>{
 
 async function generateCandlestickData(tokenMint:string) {
   
-  const data = await fetchPoolData(tokenMint);
+  const currentTimestamp = Math.floor(Date.now() / 1000);
 
-  // simulating
-  for (let i = counter; i < counter + 10; i++) {
-    const timestamp = Math.floor(Date.now() / 1000) + i * 3600; // Hourly intervals
-    const open = data.price * (1 - Math.random() * 0.01); // Simulate small changes
-    const high = open * (1 + Math.random() * 0.01);
-    const low = open * (1 - Math.random() * 0.01);
-    const close = (open + high + low) / 3;
-
-    history.push({ time: timestamp, open, high, low, close });
-    
+  if (!tokenDataMap.has(tokenMint)) {
+    tokenDataMap.set(tokenMint, {
+      history: [],
+      lastFetchedTimestamp: currentTimestamp - 60, // Align to nearest min
+    });
   }
-  counter+=10
-  
+
+  const tokenData = tokenDataMap.get(tokenMint)!;
+  const { history } = tokenData;
+  let { lastFetchedTimestamp } = tokenData;
+
+  const interval = 30; // 1-hour interval
+
+  console.log(`Processing token: ${tokenMint}`);
+  console.log(`currentTimestamp: ${currentTimestamp}`);
+  console.log(`lastFetchedTimestamp: ${lastFetchedTimestamp}`);
+  console.log(`Condition: ${lastFetchedTimestamp + interval <= currentTimestamp}`);
+
+  // Debugging edge case
+  // if (lastFetchedTimestamp + interval > currentTimestamp) {
+  //   console.warn(
+  //     `Skipping loop as no intervals exist: lastFetchedTimestamp=${lastFetchedTimestamp}, interval=${interval}, currentTimestamp=${currentTimestamp}`
+  //   );
+  //   return history;
+  // }
+
+  while (lastFetchedTimestamp + interval <= currentTimestamp) {
+    const startTime = lastFetchedTimestamp;
+    const endTime = startTime + interval;
+
+    console.log(
+      `Fetching data for interval: ${new Date(startTime * 1000).toISOString()} - ${new Date(
+        endTime * 1000
+      ).toISOString()}`
+    );
+
+    const prices: number[] = [];
+    for (let t = startTime; t < endTime; t += 3) {
+      try {
+        const poolData = await fetchPoolData(tokenMint);
+        console.log(poolData)
+        prices.push(poolData.price); // Collect prices every minute
+      } catch (error) {
+        console.error(`Error fetching pool data: ${error}`);
+        break;
+      }
+    }
+
+    console.log(`Prices collected for interval:`, prices);
+
+    if (prices.length > 0) {
+      const open = prices[0];
+      const high = Math.max(...prices);
+      const low = Math.min(...prices);
+      const close = prices[prices.length - 1];
+
+      history.push({
+        time: startTime,
+        open,
+        high,
+        low,
+        close,
+      });
+    } else {
+      console.warn(`No prices found for interval ${startTime} - ${endTime}`);
+    }
+
+    lastFetchedTimestamp += interval;
+  }
+
+  tokenDataMap.set(tokenMint, { history, lastFetchedTimestamp });
+
+  // console.log(`Updated history for ${tokenMint}:`, history);
   return history;
 }
 
